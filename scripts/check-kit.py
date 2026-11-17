@@ -10,6 +10,7 @@ Checks:
   - bin/testkit_sync.py installs into a temp project for every coding agent; generated Codex TOML parses
   - every README.*.md links back to the other languages
 """
+import os
 import py_compile
 import re
 import subprocess
@@ -20,6 +21,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 VENDORED = {"docx", "pdf", "xlsx", "pptx"}  # third-party, kept unmodified
+# On Windows plain "bash" can resolve to WSL's bash, which does not understand Windows paths; prefer Git Bash.
+_GIT_BASH = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe"
+BASH = os.environ.get("TESTKIT_BASH") or (str(_GIT_BASH) if os.name == "nt" and _GIT_BASH.exists() else "bash")
 NON_PORTABLE = [r"\bSkill tool\b", r"\bRead tool\b", r"\bAgent tool\b", r"\bsubagent_type\b(?!: \"test-lead\")"]
 errors = []
 
@@ -89,7 +93,7 @@ def check_code():
     for f in [ROOT / "install.sh", ROOT / "bin/testkit", *sorted(ROOT.rglob("*.sh"))]:
         if "node_modules" in f.parts:
             continue
-        r = subprocess.run(["bash", "-n", str(f)], capture_output=True, text=True)
+        r = subprocess.run([BASH, "-n", f.relative_to(ROOT).as_posix()], cwd=ROOT, capture_output=True, text=True)
         if r.returncode:
             err(f"{f.relative_to(ROOT)}: {r.stderr.strip()}")
 
