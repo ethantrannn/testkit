@@ -1,0 +1,278 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["mcp==1.29.1", "pyyaml==6.0.3"]
+# ///
+"""Decision memory: one decision per file in qa/knowledge/decisions/, plus a README index and graph episodes.
+
+    uv run decisions.py new --title "Order cancel window is 30 minutes" --area orders \\
+        [--tags cancel,payment] [--source "PO answer in PROJ-123 comment 2026-11-17"] \\
+        [--related PROJ-123,TC-S2-004] [--supersedes D-20261001-01] [--status accepted] [--date 2026-11-17] \\
+        [--context TEXT] [--decision TEXT] [--consequence TEXT] [--file body.md] [--no-graph]
+    uv run decisions.py list [--status accepted] [--area orders] [--tag cancel] [--json]
+    uv run decisions.py show D-20261117-01
+    uv run decisions.py supersede D-20261001-01 --by D-20261117-01
+    uv run decisions.py index
+    uv run decisions.py ingest [--all | D-… ...]
+
+Files: qa/knowledge/decisions/D-<YYYYMMDD>-<NN>-<slug>.md with YAML frontmatter
+(id, title, date, status, area, tags, source, supersedes, superseded_by, related) and the sections
+Context / Decision / Consequence for testing. `--file` supplies those sections as markdown instead.
+`new` and `supersede` rebuild the index (decisions/README.md) and send the changed decisions to the
+graph through kg.py (queued in qa/knowledge/.pending/ when the graph is unreachable).
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import re
+import sys
+from pathlib import Path
+
+import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import kg  # noqa: E402
+
+STATUSES = ("accepted", "superseded", "rejected")
+ID_RE = re.compile(r"^D-\d{8}-\d{2}$")
+FIELDS = ["id", "title", "date", "status", "area", "tags", "source", "supersedes", "superseded_by", "related"]
+
+
+def ddir(kb) -> Path:
+    return kb.dir / "decisions"
+
+
+def parse(path: Path) -> tuple[dict, str]:
+    text = path.read_text(encoding="utf-8")
+    m = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", text, re.S)
+    if not m:
+        raise SystemExit(f"error: {path} has no YAML frontmatter")
+    meta = yaml.safe_load(m.group(1)) or {}
+    for k in ("tags", "related"):
+        v = meta.get(k)
+        meta[k] = [] if v in (None, "") else ([v] if isinstance(v, str) else list(v))
+    meta["date"] = str(meta.get("date") or "")
+    return meta, m.group(2)
+
+
+def write(path: Path, meta: dict, body: str):
+    fm = {k: meta.get(k) for k in FIELDS}
+    for k in ("supersedes", "superseded_by"):
+        fm[k] = fm[k] or None
+    text = "---\n" + yaml.safe_dump(fm, sort_keys=False, allow_unicode=True, width=1000) + "---\n\n" + body.strip() + "\n"
+    path.write_text(text, encoding="utf-8")
+
+
+def all_decisions(kb) -> list[tuple[Path, dict, str]]:
+    d = ddir(kb)
+    out = []
+    for p in sorted(d.glob("D-*.md")) if d.is_dir() else []:
+        meta, body = parse(p)
+        out.append((p, meta, body))
+    return out
+
+
+def find(kb, did: str) -> tuple[Path, dict, str]:
+    for p, meta, body in all_decisions(kb):
+        if meta.get("id") == did or p.name.startswith(did + "-") or p.stem == did:
+            return p, meta, body
+    raise SystemExit(f"error: decision {did} not found in {kb.rel(ddir(kb))}")
+
+
+def next_id(kb, date: str) -> str:
+    day = date.replace("-", "")
+    nums = [int(p.name[11:13]) for p in ddir(kb).glob(f"D-{day}-*.md")] if ddir(kb).is_dir() else []
+    return f"D-{day}-{(max(nums) + 1 if nums else 1):02d}"
+
+
+def episode(kb, path: Path, meta: dict, body: str):
+    lines = [f"Decision {meta['id']}: {meta['title']}",
+             f"Status: {meta['status']}" + (f" (superseded by {meta['superseded_by']})" if meta.get("superseded_by") else ""),
+             f"Area: {meta.get('area') or '-'}; tags: {', '.join(meta.get('tags') or []) or '-'}",
+             f"Decided: {meta['date']}; source: {meta.get('source') or '-'}"]
+    if meta.get("supersedes"):
+        lines.append(f"This decision replaces {meta['supersedes']}; the earlier rule no longer applies.")
+    if meta.get("related"):
+        lines.append(f"Related: {', '.join(meta['related'])}")
+    text = "\n".join(lines) + "\n\n" + body.strip()
+    ep, notes = kg.make_episode(meta["id"], meta["title"], text,
+                                f"testkit decision {meta['id']} ({meta['status']}) — {kb.rel(path)}",
+                                meta["date"], file=kb.rel(path))
+    return ep, notes
+
+
+def ingest(kb, items, no_graph=False):
+    if no_graph or not items:
+        return
+    eps, notes = [], []
+    for p, meta, body in items:
+        e, n = episode(kb, p, meta, body)
+        eps.append(e)
+        notes += n
+    for n in sorted(set(notes)):
+        print(f"  safety: {n}")
+    kg.print_report(kb.ingest(eps))
+
+
+def build_index(kb) -> Path:
+    rows = all_decisions(kb)
+    out = ["# Decisions", "",
+           "One file per decision. Newest first. Superseded and rejected decisions stay for history.",
+           "Regenerated by `decisions.py index`; do not edit this table by hand.", "",
+           "| ID | Date | Status | Area | Title | Tags | Related | Superseded by |",
+           "|---|---|---|---|---|---|---|---|"]
+    for p, m, _ in sorted(rows, key=lambda r: r[1].get("id", ""), reverse=True):
+        def c(v):
+            return str(v or "").replace("|", "\\|")
+        out.append(f"| [{c(m.get('id'))}]({p.name}) | {c(m.get('date'))} | {c(m.get('status'))} | {c(m.get('area'))} | "
+                   f"{c(m.get('title'))} | {c(', '.join(m.get('tags') or []))} | {c(', '.join(m.get('related') or []))} | "
+                   f"{c(m.get('superseded_by'))} |")
+    path = ddir(kb) / "README.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+    return path
+
+
+def csv(v) -> list[str]:
+    return [x.strip() for x in (v or "").split(",") if x.strip()]
+
+
+def cmd_new(kb, a):
+    date = a.date or dt.date.today().isoformat()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        raise SystemExit("error: --date must be YYYY-MM-DD")
+    if a.status not in STATUSES:
+        raise SystemExit(f"error: --status must be one of {', '.join(STATUSES)}")
+    old = find(kb, a.supersedes) if a.supersedes else None
+    did = next_id(kb, date)
+    if a.file:
+        body = Path(a.file).read_text(encoding="utf-8")
+    else:
+        if not a.decision:
+            raise SystemExit("error: give --decision (and ideally --context, --consequence) or --file")
+        body = (f"## Context\n\n{a.context or '-'}\n\n## Decision\n\n{a.decision}\n\n"
+                f"## Consequence for testing\n\n{a.consequence or '-'}\n")
+    meta = {"id": did, "title": a.title.strip(), "date": date, "status": a.status, "area": a.area or "",
+            "tags": csv(a.tags), "source": a.source or "", "supersedes": a.supersedes, "superseded_by": None,
+            "related": csv(a.related)}
+    ddir(kb).mkdir(parents=True, exist_ok=True)
+    path = ddir(kb) / f"{did}-{kg.slug(a.title, 50)}.md"
+    write(path, meta, body)
+    print(f"wrote {kb.rel(path)}")
+    changed = [(path, meta, body)]
+    if old:
+        op, om, ob = old
+        om["status"], om["superseded_by"] = "superseded", did
+        write(op, om, ob)
+        print(f"marked {om['id']} superseded by {did}")
+        changed.append((op, om, ob))
+    print(f"index: {kb.rel(build_index(kb))}")
+    ingest(kb, changed, a.no_graph)
+    return 0
+
+
+def cmd_supersede(kb, a):
+    op, om, ob = find(kb, a.old)
+    np_, nm, nb = find(kb, a.by)
+    om["status"], om["superseded_by"] = "superseded", nm["id"]
+    nm["supersedes"] = om["id"]
+    write(op, om, ob)
+    write(np_, nm, nb)
+    print(f"{om['id']} superseded by {nm['id']}; index: {kb.rel(build_index(kb))}")
+    ingest(kb, [(op, om, ob), (np_, nm, nb)], a.no_graph)
+    return 0
+
+
+def cmd_list(kb, a):
+    rows = []
+    for p, m, _ in all_decisions(kb):
+        if a.status and m.get("status") != a.status:
+            continue
+        if a.area and (m.get("area") or "").lower() != a.area.lower():
+            continue
+        if a.tag and a.tag not in (m.get("tags") or []):
+            continue
+        rows.append({**{k: m.get(k) for k in FIELDS}, "file": kb.rel(p)})
+    if a.json:
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+    else:
+        for r in rows:
+            sup = f" → {r['superseded_by']}" if r.get("superseded_by") else ""
+            print(f"{r['id']}  {r['date']}  {r['status']}{sup}  [{r['area']}]  {r['title']}  ({r['file']})")
+        if not rows:
+            print("no decisions")
+    return 0
+
+
+def cmd_show(kb, a):
+    p, _, _ = find(kb, a.id)
+    print(f"# {kb.rel(p)}\n")
+    print(p.read_text(encoding="utf-8"))
+    return 0
+
+
+def cmd_index(kb, a):
+    print(f"wrote {kb.rel(build_index(kb))}")
+    return 0
+
+
+def cmd_ingest(kb, a):
+    items = all_decisions(kb) if a.all or not a.ids else [find(kb, i) for i in a.ids]
+    if not items:
+        print("no decisions to ingest")
+        return 0
+    ingest(kb, items)
+    return 0
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], epilog=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--project", help="project root (default: nearest folder with qa/config.yml)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("new")
+    p.add_argument("--title", required=True)
+    p.add_argument("--area", help="feature / module, e.g. orders")
+    p.add_argument("--tags", help="comma-separated")
+    p.add_argument("--source", help="who decided and where (PO answer in PROJ-123 comment, meeting 2026-11-17, ...)")
+    p.add_argument("--related", help="comma-separated tickets, TC ids, bug ids, spec questions")
+    p.add_argument("--supersedes", help="id of the decision this one replaces")
+    p.add_argument("--status", default="accepted")
+    p.add_argument("--date", help="YYYY-MM-DD (default today)")
+    p.add_argument("--context")
+    p.add_argument("--decision")
+    p.add_argument("--consequence", help="what this means for testing")
+    p.add_argument("--file", help="markdown body with the three sections")
+    p.add_argument("--no-graph", action="store_true", help="write files only")
+    p = sub.add_parser("supersede")
+    p.add_argument("old")
+    p.add_argument("--by", required=True)
+    p.add_argument("--no-graph", action="store_true")
+    p = sub.add_parser("list")
+    p.add_argument("--status", choices=STATUSES)
+    p.add_argument("--area")
+    p.add_argument("--tag")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("show")
+    p.add_argument("id")
+    sub.add_parser("index")
+    p = sub.add_parser("ingest")
+    p.add_argument("ids", nargs="*")
+    p.add_argument("--all", action="store_true")
+    a = ap.parse_args(argv)
+    root = Path(a.project).resolve() if a.project else kg.find_root(Path.cwd())
+    kb = kg.KB(root)
+    if not kb.k["enabled"]:
+        print("knowledge.enabled is false in qa/config.yml: nothing to do")
+        return 0
+    try:
+        return {"new": cmd_new, "supersede": cmd_supersede, "list": cmd_list, "show": cmd_show,
+                "index": cmd_index, "ingest": cmd_ingest}[a.cmd](kb, a)
+    except kg.GraphError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 3
+
+
+if __name__ == "__main__":
+    sys.exit(main())

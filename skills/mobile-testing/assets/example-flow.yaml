@@ -1,0 +1,36 @@
+# qa/runs/<RUN_ID>/mobile/<STREAM_ID>/<TC_ID>.yaml — one flow per test case.
+# Validate: maestro check-syntax <file>   Run: maestro_run.sh <RUN_ID> <STREAM_ID>
+appId: ${MAESTRO_APP_ID}            # set by the executor from mobile.app_id.<platform> in qa/config.yml
+name: TC-S1-001 Log in with a valid email and password
+tags: [PROJ-123, S1, P0]
+---
+# Fresh install state and known permission answers, so the case is independent.
+- launchApp:
+    clearState: true
+    permissions:
+      notifications: deny
+      location: allow
+# System permission dialog that still shows up (some OS versions ignore the launch permissions).
+- runFlow:
+    when:
+      visible: "Allow"
+    commands:
+      - tapOn: "Allow"
+- tapOn: "Email"
+- inputText: ${MAESTRO_MEMBER_EMAIL}
+- tapOn:
+    id: "password_input"           # resource-id (Android) / accessibilityIdentifier (iOS)
+- inputText: ${MAESTRO_MEMBER_PASSWORD}
+- hideKeyboard
+- tapOn: "Sign in"
+# Step 4 expected: home screen with the display name within 10 s.
+- extendedWaitUntil:
+    visible: "Welcome"
+    timeout: 10000
+- takeScreenshot: TC-S1-001-step4
+# Deep link into a screen (custom scheme or verified https link).
+- openLink: ${MAESTRO_DEEP_LINK_SCHEME}://orders/42
+- assertVisible:
+    text: "Order #42"
+- takeScreenshot: TC-S1-001-step5
+- assertNotVisible: "Something went wrong"

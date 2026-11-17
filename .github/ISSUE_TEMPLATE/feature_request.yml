@@ -1,0 +1,20 @@
+name: Feature request
+description: A tester workflow, skill, tool or coding agent testkit should support
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What do testers need to do?
+      description: The task or problem, as a tester would describe it.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Skill, agent change, tool or integration you have in mind, and what it would produce.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: How do you do it today?

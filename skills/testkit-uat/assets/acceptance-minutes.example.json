@@ -1,0 +1,49 @@
+{
+ "title": "BIÊN BẢN NGHIỆM THU",
+ "subtitle": "Kiểm thử chấp nhận người dùng (UAT) — PROJ-123: Đăng nhập và mã giảm giá",
+ "meta": [
+  ["Dự án", "Cửa hàng trực tuyến"],
+  ["Phạm vi", "PROJ-123 — Đăng nhập và mã giảm giá"],
+  ["Phiên bản / build", "2026.11.2"],
+  ["Môi trường", "UAT — https://uat.example.com"],
+  ["Thời gian UAT", "18/11/2026 – 20/11/2026"],
+  ["Ngày lập biên bản", "21/11/2026"],
+  ["Địa điểm", "Trực tuyến (Google Meet)"]
+ ],
+ "sections": [
+  {"heading": "1. Thành phần tham dự", "level": 1, "blocks": [
+   {"type": "table", "columns": ["Họ và tên", "Đơn vị", "Vai trò"], "widths": [3, 3, 3], "rows": [
+    ["Nguyễn Văn An", "Phòng Kinh doanh", "Product Owner — đại diện bên nghiệm thu"],
+    ["Lê Minh Châu", "Nhóm phát triển", "Trưởng nhóm phát triển"],
+    ["Trần Thị Bích", "Nhóm QA", "QA lead"]]}
+  ]},
+  {"heading": "2. Phạm vi nghiệm thu", "level": 1, "blocks": [
+   {"type": "paragraph", "text": "Trong phạm vi:"},
+   {"type": "bullets", "items": ["AC-1: Khách hàng đăng nhập bằng email và mật khẩu.", "AC-2: Áp mã giảm giá 10% khi thanh toán."]},
+   {"type": "paragraph", "text": "Ngoài phạm vi:"},
+   {"type": "bullets", "items": ["Thanh toán qua VNPay (nghiệm thu ở PROJ-125)."]}
+  ]},
+  {"heading": "3. Tóm tắt kết quả", "level": 1, "blocks": [
+   {"type": "table", "columns": ["Tổng kịch bản", "Pass", "Fail", "Chưa thực hiện"], "rows": [["2", "1", "1", "0"]]},
+   {"type": "table", "columns": ["Scenario ID", "Luồng nghiệp vụ", "Kết quả", "Ghi chú"], "widths": [2, 5, 1.5, 5], "rows": [
+    ["UAT-01", "Khách hàng đăng nhập để mua hàng", "PASS", ""],
+    ["UAT-02", "Khách hàng dùng mã giảm giá khi thanh toán", "FAIL", "Tổng tiền không giảm (D-01)"]]}
+  ]},
+  {"heading": "4. Lỗi còn tồn đọng", "level": 1, "blocks": [
+   {"type": "table", "columns": ["Mã lỗi", "Mô tả", "Severity", "Status", "Hướng xử lý / hạn"], "widths": [2, 5, 1.5, 1.5, 4], "rows": [
+    ["D-01", "Mã GIAM10 không được áp dụng cho đơn 1.000.000 ₫", "major", "open", "Sửa trong bản 2026.11.3, hạn 25/11/2026"]]}
+  ]},
+  {"heading": "5. Kết luận", "level": 1, "blocks": [
+   {"type": "paragraph", "text": "☐ Chấp nhận (Accepted)"},
+   {"type": "paragraph", "text": "☒ Chấp nhận có điều kiện (Accepted with conditions)", "bold": true},
+   {"type": "paragraph", "text": "☐ Không chấp nhận (Rejected)"},
+   {"type": "paragraph", "text": "Điều kiện kèm theo:"},
+   {"type": "numbered", "items": ["Lỗi D-01 được sửa và kiểm tra lại đạt trước ngày 25/11/2026.", "Kịch bản UAT-02 được thực hiện lại và đạt."]}
+  ]},
+  {"heading": "6. Chữ ký", "level": 1, "blocks": [
+   {"type": "paragraph", "text": "Biên bản được lập thành 02 bản có giá trị như nhau, mỗi bên giữ 01 bản."},
+   {"type": "table", "columns": ["Đại diện bên nghiệm thu", "Đại diện nhóm phát triển", "Đại diện QA"], "widths": [1, 1, 1], "rows": [
+    ["(Ký, ghi rõ họ tên)\n\n\n\n\nNguyễn Văn An\nNgày: ....../....../2026", "(Ký, ghi rõ họ tên)\n\n\n\n\nLê Minh Châu\nNgày: ....../....../2026", "(Ký, ghi rõ họ tên)\n\n\n\n\nTrần Thị Bích\nNgày: ....../....../2026"]]}
+  ]}
+ ]
+}

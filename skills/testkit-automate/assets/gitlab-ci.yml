@@ -1,0 +1,48 @@
+# testkit-automate: Playwright regression suite in qa/automation.
+# Merge into .gitlab-ci.yml (or `include:` this file). Merge requests: smoke suite. Scheduled pipelines: full suite.
+# Settings → CI/CD → Variables (masked + protected):
+#   TESTKIT_BASE_URL                                base_url of a non-production environment from qa/config.yml
+#   TESTKIT_E2E_<ROLE>_EMAIL / TESTKIT_E2E_<ROLE>_PASSWORD   one pair per role in tests/auth.setup.ts
+# Create the nightly run in Build → Pipeline schedules.
+# The image tag MUST equal the @playwright/test version in qa/automation/package.json (browsers are preinstalled).
+
+.e2e:
+  stage: test
+  image: mcr.microsoft.com/playwright:v1.65.1-noble
+  timeout: 30m
+  variables:
+    npm_config_cache: "$CI_PROJECT_DIR/qa/automation/.npm"
+  cache:
+    key:
+      files:
+        - qa/automation/package-lock.json
+    paths:
+      - qa/automation/.npm/
+  before_script:
+    - cd qa/automation
+    - npm ci --prefer-offline
+  artifacts:
+    when: always
+    expire_in: 14 days
+    paths:
+      - qa/automation/reports/
+      - qa/automation/test-results/
+    reports:
+      junit: qa/automation/reports/junit.xml
+
+e2e-smoke:
+  extends: .e2e
+  script:
+    - npx playwright test --grep @smoke
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+e2e-full:
+  extends: .e2e
+  script:
+    - npx playwright test
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "web"
+      when: manual
+      allow_failure: true

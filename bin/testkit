@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# testkit CLI (macOS / Linux). Installed by install.sh as ~/.local/bin/testkit.
+#
+#   testkit init [dir] [--agents LIST] [--force] [--offline]
+#                                              install/refresh testkit in a project (default: current dir)
+#                                              LIST: auto (default), all, or claude,codex,cursor,gemini,copilot
+#   testkit update [dir]                       same as init, for a project that already has testkit
+#   testkit doctor                             check coding agents, browser-use, Chrome and the kit
+#   testkit graph up|status|down|connect|...   Graphiti knowledge graph: reuse an existing one or start one (Docker)
+#   testkit version                            print kit version
+#   testkit help
+#
+# Env: TESTKIT_HOME (default ~/.testkit), TESTKIT_SOURCE / TESTKIT_REF override ~/.testkit/config.
+
+set -euo pipefail
+
+TESTKIT_HOME="${TESTKIT_HOME:-$HOME/.testkit}"
+KIT="$TESTKIT_HOME/kit"
+CONF="$TESTKIT_HOME/config"
+
+if [ -t 1 ]; then B=$'\033[1m' G=$'\033[32m' Y=$'\033[33m' R=$'\033[31m' N=$'\033[0m'; else B="" G="" Y="" R="" N=""; fi
+step() { printf '\n%s==> %s%s\n' "$B" "$*" "$N"; }
+ok()   { printf '  %s✔%s %s\n' "$G" "$N" "$*"; }
+warn() { printf '  %s!%s %s\n' "$Y" "$N" "$*"; }
+fail() { printf '  %s✘%s %s\n' "$R" "$N" "$*" >&2; }
+die()  { fail "$*"; exit 1; }
+has()  { command -v "$1" >/dev/null 2>&1; }
+
+conf_get() { [ -f "$CONF" ] && sed -n "s/^$1=//p" "$CONF" | tail -1 || true; }
+SOURCE="${TESTKIT_SOURCE:-$(conf_get source)}"
+REF="${TESTKIT_REF:-$(conf_get ref)}"; REF="${REF:-main}"
+
+kit_version() { sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$1/.claude-plugin/plugin.json" 2>/dev/null | head -1; }
+
+# Download the latest kit from SOURCE into KIT, swapping directories atomically.
+# SOURCE is a GitHub "owner/repo", a git URL, or a local directory.
+fetch_kit() {
+  [ -n "$SOURCE" ] || die "No kit source configured. Re-run the installer or set TESTKIT_SOURCE."
+  mkdir -p "$TESTKIT_HOME"
+  local tmp; tmp="$(mktemp -d "$TESTKIT_HOME/.fetch.XXXXXX")"
+  mkdir -p "$tmp/kit"
+  if [ -d "$SOURCE" ]; then
+    (cd "$SOURCE" && tar cf - --exclude .git --exclude node_modules --exclude 'skills/browser-testing/references' .) | (cd "$tmp/kit" && tar xf -)
+  elif [[ "$SOURCE" == git@* || "$SOURCE" == *.git ]]; then
+    git clone --quiet --depth 1 --branch "$REF" "$SOURCE" "$tmp/kit" && rm -rf "$tmp/kit/.git"
+  elif [[ "$SOURCE" == http://* || "$SOURCE" == https://* ]]; then
+    curl -fsSL "${SOURCE%/}/kit.tar.gz" | tar xz -C "$tmp/kit" --strip-components=1
+  else
+    curl -fsSL "https://codeload.github.com/$SOURCE/tar.gz/$REF" | tar xz -C "$tmp/kit" --strip-components=1
+  fi || { rm -rf "$tmp"; return 1; }
+  [ -f "$tmp/kit/.claude-plugin/plugin.json" ] || { rm -rf "$tmp"; fail "Downloaded content is not a testkit kit ($SOURCE@$REF)"; return 1; }
+  chmod +x "$tmp/kit/bin/testkit" 2>/dev/null || true
+  rm -rf "$KIT.old"; [ -d "$KIT" ] && mv "$KIT" "$KIT.old"
+  mv "$tmp/kit" "$KIT"; rm -rf "$KIT.old" "$tmp"
+}
+
+# browser-use 1.x (the heredoc CLI); 0.x is a different tool.
+bu_ok() { has browser-use && browser-use --version 2>/dev/null | grep -qE '^browser-use [1-9]'; }
+
+manifest_of() { # manifest_of <dir> → path of the project's manifest (current or legacy location)
+  local f; for f in "$1/qa/.testkit-manifest" "$1/.claude/.testkit-manifest"; do [ -f "$f" ] && { echo "$f"; return; }; done
+}
+
+run_py() {
+  if has uv; then uv run --no-project --quiet python "$@"
+  elif has python3; then python3 "$@"
+  else die "Neither uv nor python3 found. Install uv: curl -LsSf https://astral.sh/uv/install.sh | sh"; fi
+}
+
+cmd_init() {
+  local dir="." force="" offline=0 agents="" require_manifest="${REQUIRE_MANIFEST:-0}"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --force) force="--force" ;; --offline) offline=1 ;;
+      --agents) agents="${2:?--agents needs a value (auto, all, or claude,codex,cursor,gemini,copilot)}"; shift ;;
+      --agents=*) agents="${1#--agents=}" ;;
+      -*) die "Unknown option: $1" ;;
+      *) dir="$1" ;;
+    esac; shift
+  done
+  mkdir -p "$dir"; dir="$(cd "$dir" && pwd)"
+  [ "$dir" = "$HOME" ] && die "Refusing to install into your home folder. cd into a project first."
+  [ "$require_manifest" = 1 ] && [ -z "$(manifest_of "$dir")" ] && die "testkit is not installed in $dir. Run: testkit init"
+
+  printf '%stestkit init%s → %s\n' "$B" "$N" "$dir"
+
+  step "Fetching the latest kit"
+  if [ "$offline" = 1 ]; then warn "offline: using cached kit"
+  elif fetch_kit; then ok "kit $(kit_version "$KIT") from $SOURCE@$REF"
+  elif [ -d "$KIT" ]; then warn "download failed; using cached kit $(kit_version "$KIT")"
+  else die "Could not download the kit and no cached copy exists."
+  fi
+  [ -d "$KIT" ] || die "No kit at $KIT. Re-run the installer."
+
+  run_py "$KIT/bin/testkit_sync.py" --kit "$KIT" --project "$dir" --source "$SOURCE@$REF" \
+    ${agents:+--agents "$agents"} $force
+}
+
+cmd_doctor() {
+  local status=0
+  step "Tools"
+  if has node; then ok "node $(node -v) (optional, for agent-browser)"; fi
+  local a found=0
+  for a in claude codex cursor-agent gemini copilot; do
+    if has "$a"; then ok "$a $("$a" --version 2>/dev/null | head -1)"; found=1; fi
+  done
+  [ "$found" = 1 ] || { fail "no coding agent CLI found (Claude Code, Codex, Cursor, Gemini CLI or Copilot)"; status=1; }
+  if has uv; then ok "uv $(uv --version | awk '{print $2}')"; else warn "uv not found (needed to install/update browser-use)"; fi
+  if bu_ok; then
+    ok "$(browser-use --version | head -1)"
+    local tmpd; tmpd="$(mktemp -d)"
+    if (cd "$tmpd" && bash "$KIT/skills/browser-testing/scripts/bu-session.sh" run testkit-doctor <<'PY' 2>&1 | grep -q "testkit ok"
+new_tab("data:text/html,<h1>testkit ok</h1>")
+wait_for_load()
+print(js("document.querySelector('h1').textContent"))
+PY
+    ); then ok "isolated browser session works"
+    else fail "isolated browser session failed (Chrome installed? try: browser-use --doctor)"; status=1; fi
+    (cd "$tmpd" && bash "$KIT/skills/browser-testing/scripts/bu-session.sh" stop testkit-doctor >/dev/null 2>&1) || true
+    rm -rf "$tmpd"
+  else fail "browser-use 1.x not found (uv tool install browser-use)"; status=1; fi
+  if has agent-browser; then ok "agent-browser $(agent-browser --version | awk '{print $NF}') (optional)"; fi
+  step "Word documents"
+  if has pandoc; then ok "pandoc $(pandoc --version | head -1 | awk '{print $2}')"; else warn "pandoc not found: agents cannot read .docx specs"; fi
+  if has soffice || [ -d /Applications/LibreOffice.app ]; then ok "LibreOffice"; else warn "LibreOffice not found (optional: renders Word exports for a visual check)"; fi
+  if has pdftoppm; then ok "pdftoppm"; else warn "pdftoppm not found (optional, poppler)"; fi
+  step "Optional tools (install with: install.sh --with <group>)"
+  local t g missing=""
+  for t in hurl:api mailpit:mail psql:db mysql:db node:automation ffmpeg:video k6:load maestro:mobile docker:security; do
+    g="${t#*:}"; t="${t%%:*}"
+    if has "$t"; then ok "$t ($g)"; else missing="$missing $t($g)"; fi
+  done
+  [ -n "$missing" ] && echo "  - not installed:$missing"
+  if has maestro; then
+    local jv; jv="$( { [ -n "${JAVA_HOME:-}" ] && "$JAVA_HOME/bin/java" -version 2>&1 || java -version 2>&1; } | head -1)"
+    case "$jv" in *'"1.'*|'') warn "Maestro needs Java 17+; found: ${jv:-none}. Set JAVA_HOME to a JDK 17+" ;; *) ok "java: $jv" ;; esac
+  fi
+  step "Knowledge graph"
+  if [ -d "$KIT" ]; then
+    local g; g="$(run_py "$KIT/bin/testkit_graph.py" detect 2>/dev/null | tail -1 || true)"
+    case "$g" in http*) ok "Graphiti: $g" ;; *) warn "no Graphiti found: project knowledge stays in qa/knowledge/ files (start one with: testkit graph up)" ;; esac
+  fi
+  step "Kit"
+  if [ -d "$KIT" ]; then ok "cached kit $(kit_version "$KIT") at $KIT (source: ${SOURCE:-unset}@$REF)"; else fail "no cached kit; run testkit init"; status=1; fi
+  local m; m="$(manifest_of "$(pwd)")"
+  if [ -n "$m" ]; then ok "this project: $(sed -n 's/^# version: //p' "$m") for $(sed -n 's/^# agents: //p' "$m")"; else warn "testkit not installed in $(pwd)"; fi
+  return "$status"
+}
+
+main() {
+  local cmd="${1:-help}"; [ $# -gt 0 ] && shift
+  case "$cmd" in
+    init) cmd_init "$@" ;;
+    update) REQUIRE_MANIFEST=1 cmd_init "$@" ;;
+    doctor) cmd_doctor ;;
+    graph) [ -d "$KIT" ] || die "No kit at $KIT. Re-run the installer."; run_py "$KIT/bin/testkit_graph.py" "$@" ;;
+    version|-v|--version) echo "testkit $(kit_version "$KIT")" ;;
+    help|-h|--help) sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
+    *) die "Unknown command: $cmd (try: testkit help)" ;;
+  esac
+}
+
+# Everything runs inside main so a self-update that replaces this file mid-run is safe.
+main "$@"

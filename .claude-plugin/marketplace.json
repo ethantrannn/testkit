@@ -1,0 +1,11 @@
+{
+  "name": "testkit",
+  "owner": { "name": "Ethan Tran" },
+  "plugins": [
+    {
+      "name": "testkit",
+      "source": "./",
+      "description": "QA agents and skills: plan, write, review and execute test cases, file and verify bugs."
+    }
+  ]
+}

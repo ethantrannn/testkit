@@ -1,0 +1,9 @@
+.DS_Store
+node_modules/
+__pycache__/
+*.pyc
+# generated per machine by `testkit init` (agent-browser references)
+skills/browser-testing/references/
+# install site build output (scripts/build-site.sh)
+public/
+.vercel/

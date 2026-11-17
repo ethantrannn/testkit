@@ -1,0 +1,463 @@
+"""Install or refresh testkit inside a project, for one or more coding agents.
+
+Called by `testkit init` / `testkit update` (bin/testkit, bin/testkit.ps1). Standard library only.
+
+    python testkit_sync.py --kit ~/.testkit/kit --project . [--agents auto|all|claude,codex,...]
+                           [--force] [--source TEXT]
+
+What it writes (only for the selected agents):
+
+    skills   .claude/skills/<name>/        Claude Code (also read by Cursor and Copilot)
+             .agents/skills/<name>/        Codex, Gemini CLI, Cursor, Copilot (open Agent Skills location)
+    agents   .claude/agents/<role>.md      Claude Code (also read by Cursor)
+             .codex/agents/<role>.toml     Codex (also read by Cursor)
+             .cursor/agents/<role>.md      Cursor, only when neither Claude Code nor Codex is selected
+             .gemini/agents/<role>.md      Gemini CLI
+             .github/agents/<role>.agent.md  GitHub Copilot
+    qa/      config.yml, bugs/index.md, accounts.local.json, runs/   (never overwritten)
+    qa/.testkit-manifest                   files testkit manages, version, selected agents
+
+Files listed in the manifest are updated or removed on later runs; any other existing file with the
+same path is kept unless --force.
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+AGENTS = ["claude", "codex", "cursor", "gemini", "copilot"]
+MANIFEST = "qa/.testkit-manifest"
+OLD_MANIFEST = ".claude/.testkit-manifest"
+UTF8 = (sys.stdout.encoding or "").lower().startswith("utf")
+OK, WARN = ("✔", "!") if UTF8 else ("[ok]", "[!]")
+INVOKE = {  # how a user starts a skill in each tool
+    "claude": "/testkit-config", "codex": "$testkit-config", "cursor": "/testkit-config",
+    "gemini": "ask: \"use the testkit-config skill\"", "copilot": "/testkit-config",
+}
+GITIGNORE = ["qa/accounts.local.json", "qa/runs/*/evidence/", "qa/.browser-use/", "qa/.cache/",
+             "qa/knowledge/.pending/", "qa/knowledge/.graph-state.json"]
+
+
+def ok(msg):
+    print(f"  {OK} {msg}")
+
+
+def warn(msg):
+    print(f"  {WARN} {msg}")
+
+
+def step(msg):
+    print(f"\n==> {msg}")
+
+
+# ---------- agent selection ----------
+def which(cmd):
+    return shutil.which(cmd) is not None
+
+
+def detect_agents(project: Path):
+    found = []
+    if which("claude") or (project / ".claude").is_dir():
+        found.append("claude")
+    if which("codex") or (project / ".codex").is_dir():
+        found.append("codex")
+    cursor_app = any(Path(p).exists() for p in (
+        "/Applications/Cursor.app", os.path.expandvars(r"%LOCALAPPDATA%\Programs\cursor\Cursor.exe")))
+    if which("cursor-agent") or which("cursor") or cursor_app or (project / ".cursor").is_dir():
+        found.append("cursor")
+    if which("gemini") or (project / ".gemini").is_dir():
+        found.append("gemini")
+    gh = project / ".github"
+    if which("copilot") or (gh / "copilot-instructions.md").exists() or (gh / "agents").is_dir():
+        found.append("copilot")
+    return found or ["claude"]
+
+
+def resolve_agents(arg, project: Path, old_meta):
+    if arg in (None, "", "auto"):
+        if old_meta.get("agents"):
+            return [a for a in old_meta["agents"].split(",") if a in AGENTS]
+        return detect_agents(project)
+    if arg == "all":
+        return list(AGENTS)
+    chosen = [a.strip().lower() for a in arg.split(",") if a.strip()]
+    bad = [a for a in chosen if a not in AGENTS]
+    if bad:
+        raise SystemExit(f"unknown agent(s): {', '.join(bad)} (choose from {', '.join(AGENTS)}, all, auto)")
+    return chosen
+
+
+def skill_dirs(agents):
+    dirs = []
+    if "claude" in agents:
+        dirs.append(".claude/skills")
+    needs_open_dir = {"codex", "gemini"} & set(agents) or (
+        {"cursor", "copilot"} & set(agents) and "claude" not in agents)
+    if needs_open_dir:
+        dirs.append(".agents/skills")
+    return dirs
+
+
+# ---------- agent file generation ----------
+def parse_agent(path: Path):
+    text = path.read_text(encoding="utf-8")
+    m = re.match(r"^---\n(.*?)\n---\n(.*)$", text, re.S)
+    if not m:
+        raise SystemExit(f"{path}: missing frontmatter")
+    meta = {}
+    for line in m.group(1).splitlines():
+        mm = re.match(r"^([A-Za-z_-]+):\s*(.*)$", line)
+        if mm and mm.group(2):
+            meta[mm.group(1)] = mm.group(2).strip()
+    return meta, m.group(2).lstrip("\n"), text
+
+
+def yaml_str(s):
+    return json.dumps(s, ensure_ascii=False)  # a JSON string is a valid YAML double-quoted scalar
+
+
+def toml_multiline(s):
+    if "'''" in s:
+        raise SystemExit("agent body contains ''' and cannot be written as a TOML literal string")
+    return "'''\n" + s + "'''"
+
+
+def render_agent(target, meta, body, original):
+    name, desc = meta["name"], meta["description"]
+    if target == "claude":
+        return f".claude/agents/{name}.md", original
+    if target == "codex":
+        return f".codex/agents/{name}.toml", (
+            "# Generated by testkit from agents/" + name + ".md. Edit the kit, not this file.\n"
+            f"name = {yaml_str(name)}\n"
+            f"description = {yaml_str(desc)}\n"
+            f"developer_instructions = {toml_multiline(body)}\n")
+    head = f"---\nname: {name}\ndescription: {yaml_str(desc)}\n"
+    if target == "cursor":
+        return f".cursor/agents/{name}.md", head + "model: inherit\n---\n\n" + body
+    if target == "gemini":
+        return f".gemini/agents/{name}.md", head + "---\n\n" + body
+    if target == "copilot":
+        return f".github/agents/{name}.agent.md", head + "---\n\n" + body
+    raise ValueError(target)
+
+
+def agent_targets(agents):
+    t = [a for a in agents if a != "cursor"]
+    # Cursor reads .claude/agents and .codex/agents itself; write .cursor/agents only when needed.
+    if "cursor" in agents and not ({"claude", "codex"} & set(agents)):
+        t.append("cursor")
+    return t
+
+
+# ---------- plan ----------
+def build_plan(kit: Path, agents):
+    """Return {project_rel_path: bytes} for every file testkit manages."""
+    plan = {}
+    skills_root = kit / "skills"
+    for sdir in skill_dirs(agents):
+        for f in sorted(skills_root.rglob("*")):
+            if not f.is_file() or "__pycache__" in f.parts or f.name == ".DS_Store":
+                continue
+            rel = f.relative_to(skills_root).as_posix()
+            if rel.startswith("browser-testing/references/"):
+                continue  # generated per machine
+            plan[f"{sdir}/{rel}"] = f.read_bytes()
+    for f in sorted((kit / "agents").glob("*.md")):
+        meta, body, original = parse_agent(f)
+        for target in agent_targets(agents):
+            rel, content = render_agent(target, meta, body, original)
+            plan[rel] = content.encode("utf-8")
+    return plan
+
+
+def read_manifest(project: Path):
+    for rel in (MANIFEST, OLD_MANIFEST):
+        p = project / rel
+        if p.exists():
+            meta, files = {}, []
+            for line in p.read_text(encoding="utf-8").splitlines():
+                if line.startswith("# ") and ": " in line:
+                    k, v = line[2:].split(": ", 1)
+                    meta[k.strip()] = v.strip()
+                elif line and not line.startswith("#"):
+                    files.append(line)
+            return meta, files, p
+    return {}, [], None
+
+
+def prune_empty(project: Path, start: Path):
+    """Remove empty folders under `start` (bottom-up), then empty parents up to the project root."""
+    if start.is_dir():
+        for d in sorted((p for p in start.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+            if not any(d.iterdir()):
+                d.rmdir()
+    d = start
+    while d != project and d.is_dir() and not any(d.iterdir()):
+        d.rmdir()
+        d = d.parent
+
+
+SKILL_DIRS = (".claude/skills", ".agents/skills")
+USER_SKILL_DIRS = ("~/.claude/skills", "~/.agents/skills", "~/.codex/skills", "~/.cursor/skills",
+                   "~/.gemini/skills", "~/.copilot/skills")
+
+
+def skill_of(rel):
+    """('<skills dir>', '<skill name>') for a file inside a skills folder, else None."""
+    for sdir in SKILL_DIRS:
+        if rel.startswith(sdir + "/"):
+            return sdir, rel[len(sdir) + 1:].split("/", 1)[0]
+    return None
+
+
+def foreign_skills(project: Path, plan, old, force):
+    """Skill folders that already exist in the project but were not installed by testkit.
+
+    An identical copy is adopted silently. A different one is kept as it is (the whole folder,
+    never a mix of files) unless --force."""
+    by_skill = {}
+    for rel in plan:
+        key = skill_of(rel)
+        if key:
+            by_skill.setdefault(key, []).append(rel)
+    skip = set()
+    for (sdir, name), rels in sorted(by_skill.items()):
+        folder = project / sdir / name
+        if not folder.is_dir() or any(r in old for r in rels):
+            continue
+        if all((project / r).is_file() and (project / r).read_bytes() == plan[r] for r in rels):
+            continue
+        if force:
+            warn(f"{sdir}/{name}: replacing your existing skill (--force)")
+            continue
+        warn(f"{sdir}/{name}: kept your existing skill with the same name; testkit's version is not installed "
+             f"(rename yours or use --force). Skills that call it may not work as documented.")
+        skip.add((sdir, name))
+    return skip
+
+
+def note_user_level_twins(agents, plan):
+    """Same-name skills installed for the user (outside the project) can shadow or duplicate ours."""
+    names = {skill_of(r)[1] for r in plan if skill_of(r)}
+    twins = []
+    for d in USER_SKILL_DIRS:
+        base = Path(os.path.expanduser(d))
+        for n in sorted(names):
+            if (base / n / "SKILL.md").is_file():
+                twins.append(f"{d}/{n}")
+    if twins:
+        warn("same-name skills also exist outside this project: " + ", ".join(twins)
+             + " - the coding agent may list both; the project copy is the one testkit maintains")
+
+
+def sync_files(project: Path, plan, old_files, force):
+    added = updated = same = kept = removed = 0
+    managed = []
+    old = set(old_files)
+    skip = foreign_skills(project, plan, old, force)
+    for rel, data in plan.items():
+        if skill_of(rel) in skip:
+            kept += 1
+            continue
+        dest = project / rel
+        if dest.exists():
+            if dest.read_bytes() == data:
+                same += 1
+                managed.append(rel)
+                continue
+            if not force and rel not in old:
+                warn(f"kept your file (not installed by testkit): {rel} - use --force to overwrite")
+                kept += 1
+                continue
+            updated += 1
+        else:
+            added += 1
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        if rel.endswith(".sh"):
+            dest.chmod(0o755)
+        managed.append(rel)
+    for rel in old - set(plan):
+        p = project / rel
+        if p.is_file():
+            p.unlink()
+            removed += 1
+            prune_empty(project, p.parent)
+    ok(f"added {added}, updated {updated}, unchanged {same}, removed {removed}, kept {kept}")
+    return managed
+
+
+def generate_tool_skills(project: Path, agents):
+    """Version-matched skills of the tools installed on this machine (git-ignored, not in manifest)."""
+    # Drop generated folders from skill dirs that are no longer selected, then prune empty parents.
+    for sdir in {".claude/skills", ".agents/skills"} - set(skill_dirs(agents)):
+        for gen in ("browser-use", "browser-testing/references"):
+            p = project / sdir / gen
+            if p.is_dir():
+                shutil.rmtree(p)
+        prune_empty(project, project / sdir)
+    for sdir in skill_dirs(agents):
+        base = project / sdir
+        bu = shutil.which("browser-use")
+        version = ""
+        if bu:
+            version = subprocess.run([bu, "--version"], capture_output=True, text=True).stdout.strip().splitlines()[:1]
+            version = version[0] if version else ""
+        if bu and re.match(r"^browser-use [1-9]", version):
+            subprocess.run([bu, "skill", "install", "--path", str(base / "browser-use")],
+                           check=True, capture_output=True)
+            ok(f"{sdir}/browser-use generated for {version}")
+        else:
+            warn("browser-use 1.x not found; the browser-use skill was not generated (run: testkit doctor)")
+        ab = shutil.which("agent-browser")
+        if ab:
+            refs = base / "browser-testing" / "references"
+            refs.mkdir(parents=True, exist_ok=True)
+            for name, args in (("agent-browser-core.md", ["skills", "get", "core", "--full"]),
+                               ("agent-browser-dogfood.md", ["skills", "get", "dogfood", "--full"])):
+                r = subprocess.run([ab, *args], capture_output=True)
+                if r.returncode == 0 and r.stdout:
+                    (refs / name).write_bytes(r.stdout)
+            (refs / "VERSION").write_bytes(subprocess.run([ab, "--version"], capture_output=True).stdout)
+            ok(f"{sdir}/browser-testing/references generated (agent-browser, optional)")
+
+
+INSTRUCTION_FILES = {"claude": "CLAUDE.md", "codex": "AGENTS.md", "cursor": "AGENTS.md",
+                     "copilot": "AGENTS.md", "gemini": "GEMINI.md"}
+BLOCK_BEGIN = "<!-- testkit:begin - managed by `testkit update`; edit outside this block -->"
+BLOCK_END = "<!-- testkit:end -->"
+BLOCK_BODY = """## QA with testkit
+
+This project uses testkit for testing work. Main skills: `testkit-run <ticket>` (plan, write, review and run tests),
+`testkit-verify` (re-test fixed bugs), `testkit-spec-review`, `testkit-export`; others are listed in the skills folder.
+
+- QA workspace: `qa/` (settings in `qa/config.yml`; runs, bugs, specs and knowledge live there).
+- Project knowledge: before planning tests or judging expected behaviour, check `qa/knowledge/` (project map and
+  decisions) with the `testkit-knowledge` skill (`recall`). Record product decisions and answered questions with
+  `remember`, so later sessions and other agents reuse them.
+- Tests only touch environments listed in `qa/config.yml`; test accounts and passwords stay in `qa/accounts.local.json`."""
+
+
+def update_instruction_files(project: Path, agents):
+    """Add, refresh or remove the testkit block in CLAUDE.md / AGENTS.md / GEMINI.md, never touching other text."""
+    wanted = {INSTRUCTION_FILES[a] for a in agents}
+    block = f"{BLOCK_BEGIN}\n{BLOCK_BODY}\n{BLOCK_END}\n"
+    pattern = re.compile(re.escape(BLOCK_BEGIN.split(" - ")[0]) + r".*?" + re.escape(BLOCK_END) + r"\n?", re.S)
+    for name in sorted(set(INSTRUCTION_FILES.values())):
+        f = project / name
+        text = f.read_text(encoding="utf-8") if f.exists() else None
+        if name in wanted:
+            if text is None:
+                f.write_text(block, encoding="utf-8")
+                ok(f"{name}: created with the testkit block")
+            elif pattern.search(text):
+                new = pattern.sub(lambda _m: block, text, count=1)
+                if new != text:
+                    f.write_text(new, encoding="utf-8")
+                    ok(f"{name}: testkit block updated")
+                else:
+                    ok(f"{name}: testkit block up to date")
+            else:
+                sep = "" if text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
+                f.write_text(text + sep + block, encoding="utf-8")
+                ok(f"{name}: testkit block appended (your content is unchanged)")
+        elif text is not None and pattern.search(text):
+            new = pattern.sub("", text).rstrip("\n")
+            if new:
+                f.write_text(new + "\n", encoding="utf-8")
+            else:
+                f.unlink()
+            ok(f"{name}: testkit block removed (agent no longer selected)")
+
+
+def scaffold_qa(project: Path, kit: Path, agents):
+    qa = project / "qa"
+    if qa.is_dir() and not (qa / "config.yml").exists() and any(qa.iterdir()):
+        warn("qa/ already exists and is not a testkit workspace; testkit adds its own files next to yours "
+             "(config.yml, runs/, bugs/, knowledge/) and never changes the others")
+    for d in ("runs", "bugs/evidence", "knowledge/decisions"):
+        (qa / d).mkdir(parents=True, exist_ok=True)
+    cfg = qa / "config.yml"
+    if cfg.exists():
+        ok("qa/config.yml exists (kept)")
+    else:
+        shutil.copyfile(kit / "templates/qa/config.yml", cfg)
+        ok("qa/config.yml created from template")
+    idx = qa / "bugs/index.md"
+    if not idx.exists():
+        idx.write_text("# Bugs\n\n| ID | Title | Severity | Status | Ticket | TC | Tracker |\n"
+                       "|---|---|---|---|---|---|---|\n", encoding="utf-8")
+    acc = qa / "accounts.local.json"
+    if not acc.exists():
+        acc.write_text('{\n  "pool": [],\n  "runs": {}\n}\n', encoding="utf-8")
+    lines = GITIGNORE + [f"{d}/browser-use/" for d in skill_dirs(agents)] + \
+        [f"{d}/browser-testing/references/" for d in skill_dirs(agents)]
+    gi = project / ".gitignore"
+    existing = gi.read_text(encoding="utf-8").splitlines() if gi.exists() else []
+    missing = [l for l in lines if l not in existing]
+    if missing:
+        with gi.open("a", encoding="utf-8") as f:
+            if existing and existing[-1] != "":
+                f.write("\n")
+            f.write("\n".join(missing) + "\n")
+    ok("qa/runs, qa/bugs, accounts file, .gitignore entries")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--kit", required=True)
+    ap.add_argument("--project", default=".")
+    ap.add_argument("--agents")
+    ap.add_argument("--force", action="store_true")
+    ap.add_argument("--source", default="")
+    a = ap.parse_args()
+    kit, project = Path(a.kit).resolve(), Path(a.project).resolve()
+    version = json.loads((kit / ".claude-plugin/plugin.json").read_text(encoding="utf-8"))["version"]
+
+    old_meta, old_files, old_path = read_manifest(project)
+    agents = resolve_agents(a.agents, project, old_meta)
+
+    step(f"Agents: {', '.join(agents)}")
+    ok("skills -> " + ", ".join(skill_dirs(agents)))
+    ok("subagents -> " + ", ".join(sorted({render_agent(t, {'name': 'x', 'description': ''}, '', '')[0].rsplit('/', 1)[0]
+                                           for t in agent_targets(agents)})))
+    if set(agents) & {"cursor", "copilot"} and len(skill_dirs(agents)) > 1:
+        warn("Cursor/Copilot read both .claude/skills and .agents/skills, so they list each testkit skill twice (same content)")
+
+    step("Skills and agents")
+    plan = build_plan(kit, agents)
+    note_user_level_twins(agents, plan)
+    managed = sync_files(project, plan, old_files, a.force)
+    if old_path is not None and old_path.as_posix().endswith(OLD_MANIFEST):
+        old_path.unlink()
+
+    step("Browser tools")
+    generate_tool_skills(project, agents)
+
+    step("QA workspace -> qa/")
+    scaffold_qa(project, kit, agents)
+
+    step("Agent instructions")
+    update_instruction_files(project, agents)
+
+    (project / MANIFEST).write_text(
+        "# testkit manifest - files below are managed by 'testkit update'. Do not edit.\n"
+        f"# version: {version}\n# agents: {','.join(agents)}\n# source: {a.source}\n"
+        f"# installed: {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
+        + "\n".join(sorted(set(managed))) + "\n", encoding="utf-8")
+
+    step("Next")
+    for ag in agents:
+        print(f"  {ag:8} open the project in {ag}, then {INVOKE[ag]}  (then testkit-run <ticket>)")
+    if "gemini" in agents:
+        print("  gemini   trust the project folder first, or Gemini CLI ignores project skills and agents")
+
+
+if __name__ == "__main__":
+    main()

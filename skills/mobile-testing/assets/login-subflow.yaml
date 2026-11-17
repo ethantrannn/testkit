@@ -1,0 +1,19 @@
+# qa/runs/<RUN_ID>/mobile/<STREAM_ID>/_shared/login.yaml — reusable steps, called with runFlow.
+# Files in _shared/ are not run on their own (maestro_run.sh only runs the top-level *.yaml).
+#   - runFlow:
+#       file: _shared/login.yaml
+#       env:
+#         EMAIL: ${MAESTRO_ADMIN_EMAIL}
+#         PASSWORD: ${MAESTRO_ADMIN_PASSWORD}
+appId: ${MAESTRO_APP_ID}
+---
+- tapOn: "Email"
+- inputText: ${EMAIL}
+- tapOn:
+    id: "password_input"
+- inputText: ${PASSWORD}
+- hideKeyboard
+- tapOn: "Sign in"
+- extendedWaitUntil:
+    visible: "Welcome"
+    timeout: 10000

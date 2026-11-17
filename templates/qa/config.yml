@@ -1,0 +1,185 @@
+# testkit configuration — read by test-lead, script-writer, test-reviewer, test-executor.
+
+project:
+  name: my-app
+  language: vi            # language for plans, cases, results and bugs (vi | en | ...)
+
+# Environments the agents may open. Anything not listed here is off-limits.
+environments:
+  staging:
+    base_url: https://staging.example.com
+    allow_write: true     # false → destructive cases are marked BLOCKED
+    # production: true    # mark production explicitly (names prod/production/prd/live count as production anyway);
+                          # load and security audits never run on production
+  local:
+    base_url: http://localhost:3000
+    allow_write: true
+default_environment: staging
+
+# Where the writer and lead look for requirements and implementation.
+docs:
+  paths: [docs/, README.md]
+code:
+  paths: [src/, app/]
+
+browser:
+  tool: browser-use       # browser-use | agent-browser | playwright-mcp | chrome-devtools-mcp
+  mode: isolated          # browser-use only. isolated: own headless Chrome per stream (free, parallel)
+                          #   cloud: Browser Use Cloud (browser-use login, billed) | local: your Chrome + logins, one stream at a time
+  headed: false           # true shows the Chrome windows (isolated mode)
+  telemetry: false        # browser-use anonymized telemetry; false keeps internal URLs private
+  # chrome_path: /path/to/chrome   # only if Chrome is not found automatically
+  viewport: [1280, 720]
+  mobile_viewport: [375, 812]
+
+# How the executor gets test accounts. Exactly one strategy.
+accounts:
+  strategy: signup        # signup | api | command | pool
+  email_pattern: "qa+{run}-{stream}-{role}-{ts}@example.test"
+  roles: [member, admin]
+  # strategy: api
+  # api:
+  #   method: POST
+  #   url: https://staging.example.com/api/test/users
+  #   auth_env: TESTKIT_ADMIN_TOKEN      # read from the environment, never stored here
+  #   body: '{"email":"{email}","password":"{password}","role":"{role}"}'
+  # strategy: command
+  # command: "pnpm seed:user --email {email} --password {password} --role {role}"
+  # strategy: pool → accounts listed in qa/accounts.local.json under "pool"
+  inbox:                  # optional, for email/OTP verification (data-checks skill, mailbox.py)
+    # url: http://localhost:8025     # Mailpit (or MailHog) web/API URL
+    # kind: mailpit                  # mailpit | mailhog (auto-detected if omitted)
+    # auth_env: TESTKIT_INBOX_AUTH   # optional env var holding "user:password"
+  cleanup:                # optional command run per account at the end of a stream
+    # "pnpm seed:delete-user --email {email}"
+
+# Reports
+report:
+  formats: [markdown]     # add docx and/or xlsx to also export qa/runs/<RUN_ID>/export/<RUN_ID>-report.{docx,xlsx} after each run
+
+# Release test plan estimates (testkit-plan-release); all optional
+release:
+  hours_per_day: 6                 # productive testing hours per person-day
+  minutes_per_case: {design: 10, review: 3, execute: 8}
+  retest_buffer: 0.2               # share of execution time reserved for bug retests
+  default_size:                    # streams × cases per stream when a ticket has no plan yet
+    high:   {streams: 3, cases_per_stream: 12}
+    medium: {streams: 2, cases_per_stream: 8}
+    low:    {streams: 1, cases_per_stream: 5}
+
+# API testing (api-testing skill, Hurl). Defaults work without this block.
+api:
+  base_urls: {}                 # per environment, e.g. {staging: https://api.staging.example.com}; default: environments.<env>.base_url
+  openapi: ""                   # OpenAPI/Swagger file or URL path (docs/openapi.yaml, /openapi.json)
+  read_only_posts: [/api/auth/login, /graphql]   # POSTs allowed on allow_write: false environments
+  vars: {}                      # extra plain Hurl variables, e.g. {tenant: acme}
+  secrets_env: {}               # Hurl secrets from env vars, e.g. {admin_api_key: TESTKIT_API_ADMIN_KEY}
+  max_parallel: 1               # hurl --jobs
+  delay_ms: 100                 # pause before each request (don't hammer)
+  hurl_args: []                 # extra hurl flags, e.g. [--insecure]
+  # collections:                # only if the team already has Postman/Bruno collections
+  #   - tool: newman            # newman | bruno
+  #     path: postman/app.postman_collection.json
+  #     environment: postman/staging.postman_environment.json
+
+# Backend state checks (data-checks skill). Read-only database users only.
+data_checks:
+  max_rows: 50
+  statement_timeout_s: 5
+  mask_columns: []              # extra column-name regexes to mask
+  databases: {}
+  #   main:
+  #     engine: postgres        # postgres | mysql | sqlite
+  #     url_env: TESTKIT_DB_URL # connection URL in this env var, never here
+  #     environment: staging    # must be an environment above
+
+# Test data (test-data skill)
+test_data:
+  locale: vi_VN                 # vi_VN | en_US
+  email_domain: example.test
+  seed_command: ""              # e.g. "pnpm db:seed --file {file} --prefix {prefix}"
+  cleanup_command: ""           # e.g. "pnpm db:cleanup --prefix {prefix}"
+
+# Non-functional audits (quality-audits). Load and security stay off until you list environments.
+audits:
+  a11y:
+    tags: [wcag2a, wcag2aa, wcag21a, wcag21aa]   # axe-core runOnly tags
+    fail_on: [critical, serious]
+    ignore_rules: []                              # accepted exceptions; give the reason in summary.md
+  performance:
+    profiles:
+      desktop: {network: none, cpu: 1}
+      mobile: {network: slow-4g, cpu: 4, viewport: [375, 812]}
+    budgets: {lcp_ms: 2500, cls: 0.1, tbt_ms: 300, fcp_ms: 1800, ttfb_ms: 800, transfer_kb: 1600}
+    lighthouse: auto                              # auto (when Node >= 22.19 is present) | off
+    lighthouse_min_scores: {performance: 0.8, accessibility: 0.9}
+  visual:
+    threshold_pct: 0.01                           # max % of changed pixels
+    tolerance: 16                                 # per-pixel colour distance treated as equal
+    viewports: [[1280, 720], [375, 812]]
+  load:
+    allowed_envs: []                              # e.g. [staging]; empty = off; production is always refused
+    max_vus: 10
+    max_duration: 1m
+    p95_ms: 800
+    error_rate: 0.01
+    token_env: TESTKIT_API_TOKEN                  # env var NAME only
+  security:
+    allowed_envs: []                              # ZAP baseline and header --probe; production is always refused
+    zap_image: zaproxy/zap-stable:2.17.0
+    zap_minutes: 2
+    zap_rules_file: qa/zap-rules.tsv
+
+# Mobile apps (mobile-testing, Maestro). Remove if the project has no mobile app.
+# mobile:
+#   tool: maestro                      # maestro | appium
+#   platforms: [android, ios]
+#   app_id: {android: com.example.app, ios: com.example.app}
+#   build:                             # path, url_env: TESTKIT_APK_URL, or store: "..."
+#     android: builds/app-staging.apk
+#     ios: builds/App-staging.app
+#   device: {android: emulator-5554, ios: "iPhone 16"}   # serial / name / UDID / any
+#   deep_link_scheme: myapp
+#   environment: staging
+
+# Project knowledge (testkit-knowledge). Files in qa/knowledge/ are the source of truth; the graph is optional.
+knowledge:
+  enabled: true                 # false -> the skill does nothing
+  dir: qa/knowledge
+  group_id: ""                  # graph namespace; default: slug of the project folder name
+  graphiti:
+    enabled: true               # false -> files only
+    url: ""                     # Graphiti MCP URL; empty -> TESTKIT_GRAPHITI_URL, coding-agent MCP configs, http://localhost:8000
+    timeout_s: 30
+    consent: ask                # ask | granted | denied: granted after the user agrees that ingested text goes to the graph's LLM provider
+  ingest:
+    max_chunk_chars: 6000       # documents and the project map are split by heading into sections up to this size
+    runs: true                  # test-lead records run summaries
+    bugs: true                  # bug status changes become episodes
+
+# Regression automation (testkit-automate, Playwright)
+automation:
+  dir: qa/automation            # Playwright suite
+  environment: staging          # environment the suite runs against (never production)
+  roles: [member]               # test accounts the suite logs in as
+  ci: none                      # github | gitlab | none
+  # Accounts: qa/accounts.local.json -> "automation": {"member": {"email", "password", "name"}}
+  # CI: TESTKIT_BASE_URL + TESTKIT_E2E_<ROLE>_EMAIL / _PASSWORD as pipeline secrets
+
+# Bug tracking
+tracker: files            # files | jira
+# jira:                             # used when tracker: jira (see the bug-reporting skill)
+#   project_key: PROJ
+#   issue_type: Bug
+#   severity_field: priority         # or a custom field id, e.g. customfield_10042
+#   severity_map: {blocker: Highest, critical: High, major: Medium, minor: Low, trivial: Lowest}
+#   components: []
+#   labels: [testkit]
+#   link_type: Relates
+#   attach_evidence: true
+tracker_transitions: false  # true → verify mode may transition Jira issues
+
+# Execution
+execution:
+  max_parallel_streams: 4
+  max_review_rounds: 2

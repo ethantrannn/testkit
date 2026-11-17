@@ -1,0 +1,64 @@
+{
+ "properties": {"title": "Kịch bản UAT — PROJ-123"},
+ "sheets": [
+  {
+   "name": "Hướng dẫn",
+   "title": "Kịch bản kiểm thử chấp nhận (UAT) — PROJ-123",
+   "meta": [
+    ["Dự án", "Cửa hàng trực tuyến"],
+    ["Phạm vi", "PROJ-123 — Đăng nhập và mã giảm giá"],
+    ["Môi trường", "UAT — https://uat.example.com"],
+    ["Thời gian", "18/11/2026 – 20/11/2026"],
+    ["Liên hệ QA", "<tên, email>"]
+   ],
+   "columns": [{"header": "Cột", "width": 22}, {"header": "Cách điền", "width": 70}, {"header": "Ví dụ", "width": 40}],
+   "rows": [
+    ["Kết quả", "Chọn Pass nếu mọi kết quả mong đợi đều đúng, Fail nếu có bất kỳ điểm nào sai. Để trống nếu chưa thực hiện.", "Fail"],
+    ["Ghi chú", "Mô tả ngắn điều khác với kết quả mong đợi, kèm tên ảnh chụp màn hình nếu có.", "Tổng tiền hiển thị 1.000.000 ₫, không được giảm."],
+    ["Người kiểm thử", "Họ tên người thực hiện kịch bản.", "Trần Thị Bích"],
+    ["Ngày", "Ngày thực hiện, dạng dd/mm/yyyy.", "19/11/2026"],
+    ["Lỗi", "Mỗi lỗi ghi một dòng ở sheet Defects, cột Scenario ID ghi mã UAT-xx.", "D-01 | UAT-02 | Mã GIAM10 không được áp dụng | major | open"],
+    ["Chỉ sửa", "Chỉ điền các cột Kết quả, Ghi chú, Người kiểm thử, Ngày (sheet UAT) và sheet Defects. Không sửa nội dung kịch bản; nếu kịch bản sai, ghi vào Ghi chú.", ""]
+   ],
+   "freeze_header": false, "autofilter": false, "landscape": false
+  },
+  {
+   "name": "UAT",
+   "columns": [
+    {"header": "Scenario ID", "width": 11},
+    {"header": "Luồng nghiệp vụ", "width": 26},
+    {"header": "Điều kiện trước", "width": 28},
+    {"header": "Các bước", "width": 45},
+    {"header": "Kết quả mong đợi", "width": 40},
+    {"header": "Kết quả", "width": 10, "choices": "uat", "align": "center"},
+    {"header": "Ghi chú", "width": 30},
+    {"header": "Người kiểm thử", "width": 16},
+    {"header": "Ngày", "width": 12}
+   ],
+   "rows": [
+    ["UAT-01", "Khách hàng đăng nhập để mua hàng", "Khách hàng đã có tài khoản đang hoạt động.", "1. Mở trang chủ cửa hàng.\n2. Chọn \"Đăng nhập\".\n3. Nhập email và mật khẩu của khách hàng.\n4. Chọn \"Đăng nhập\".", "- Vào được trang tài khoản.\n- Thấy đúng họ tên của khách hàng ở góc trên.", "", "", "", ""],
+    ["UAT-02", "Khách hàng dùng mã giảm giá khi thanh toán", "Khách hàng đã đăng nhập; giỏ hàng có 1 sản phẩm giá 1.000.000 ₫; mã GIAM10 còn hạn.", "1. Mở giỏ hàng.\n2. Nhập mã giảm giá GIAM10 và chọn \"Áp dụng\".\n3. Xem lại tổng tiền.", "- Thấy thông báo áp mã thành công.\n- Tổng tiền còn 900.000 ₫.", "", "", "", ""]
+   ]
+  },
+  {
+   "name": "Defects",
+   "columns": [
+    {"header": "Defect ID", "width": 11},
+    {"header": "Scenario ID", "width": 11},
+    {"header": "Mô tả", "width": 50},
+    {"header": "Severity", "width": 11, "choices": "severity"},
+    {"header": "Status", "width": 11, "choices": "bug_status"},
+    {"header": "Người báo", "width": 16},
+    {"header": "Ngày", "width": 12}
+   ],
+   "rows": [],
+   "blank_rows": 20
+  },
+  {
+   "name": "Traceability",
+   "columns": [{"header": "AC", "width": 50}, {"header": "Scenario ID", "width": 20}],
+   "rows": [["AC-1: Người dùng đăng nhập bằng email", "UAT-01"], ["AC-2: Áp mã giảm giá 10%", "UAT-02"]],
+   "landscape": false
+  }
+ ]
+}

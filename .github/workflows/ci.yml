@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Kit checks (skills spec, portability, syntax, install for every agent, README links)
+        run: python scripts/check-kit.py
+
+      - name: PowerShell scripts parse
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($f in @('install.ps1', 'bin/testkit.ps1')) {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) { $errors | ForEach-Object { Write-Host "::error file=$f::$_" }; $failed = $true }
+          }
+          if ($failed) { exit 1 }
+
+      - name: Install site builds
+        if: runner.os != 'Windows'
+        run: |
+          TESTKIT_BASE_URL=https://testkit.example.com ./scripts/build-site.sh
+          tar tzf public/kit.tar.gz | grep -q 'testkit/bin/testkit_sync.py'

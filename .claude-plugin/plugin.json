@@ -1,0 +1,8 @@
+{
+  "name": "testkit",
+  "version": "0.1.0",
+  "description": "Open-source QA team for coding agents (Claude Code, Codex, Cursor, Gemini CLI, Copilot): plan tickets into independent test streams, design and review test cases from docs, code and UI, execute them in a real browser, file and verify bugs, and produce reports, UAT and user guides.",
+  "author": { "name": "Ethan Tran" },
+  "license": "MIT",
+  "keywords": ["qa", "testing", "test-cases", "browser", "bug-tracking", "e2e", "agent-skills", "uat"]
+}
