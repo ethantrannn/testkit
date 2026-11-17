@@ -42,4 +42,5 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           TESTKIT_BASE_URL=https://testkit.example.com ./scripts/build-site.sh
-          tar tzf public/kit.tar.gz | grep -q 'testkit/bin/testkit_sync.py'
+          tar tzf public/kit.tar.gz > "$RUNNER_TEMP/kit-files.txt"   # no pipe: grep -q would close it early under pipefail
+          grep -q 'testkit/bin/testkit_sync.py' "$RUNNER_TEMP/kit-files.txt"
